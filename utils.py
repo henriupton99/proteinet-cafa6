@@ -102,13 +102,23 @@ def esm_batch_embed_hf(seqs: List[str], model_name='facebook/esm2_t6_8M_UR50D', 
     return np.vstack(all_emb)
 
 
-def make_submission_dataframe(ids: List[str], terms: List[str], scores: np.ndarray, top_k: int=100) -> pd.DataFrame:
+def make_submission_dataframe(ids, terms, scores, top_k=100, go_desc=None):
     rows = []
     for i, pid in enumerate(ids):
         top_idx = np.argsort(scores[i])[::-1][:top_k]
         for j in top_idx:
-            rows.append({'Id': pid, 'GO_term': terms[j], 'score': float(scores[i, j])})
-    return pd.DataFrame(rows, columns=['Id','GO_term','score'])
+            go_term = terms[j]
+            score = float(scores[i, j])
+            rows.append({'Id': pid, 'GO_term': go_term, 'score': score})
+            if go_desc and go_term in go_desc:
+                desc_lines = str(go_desc[go_term]).split('\n')
+                for line in desc_lines:
+                    rows.append({'Id': pid, 'GO_term': 'Text', 'score': score, 'description': line})
+
+    cols = ['Id', 'GO_term', 'score']
+    if go_desc:
+        cols.append('description')
+    return pd.DataFrame(rows, columns=cols)
 
 def build_feature_matrix(
     seqs: List[str],

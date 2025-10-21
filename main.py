@@ -75,9 +75,9 @@ def predict_mode(model_path, vectorizer_path, test_fasta, out_csv, top_k=20):
     X = build_feature_matrix(seqs, use_kmer=True, pretrained_vec=km)
     scores = model.predict_proba(X)
 
-    df_sub = make_submission_dataframe(ids, mlb.classes_.tolist(), scores, top_k=top_k)
-    df_sub.to_csv(out_csv, index=False)
-    print(f"✅ Saved Kaggle-ready submission ({top_k} GO terms/protein): {out_csv}")
+    df_sub = make_submission_dataframe(ids, mlb.classes_.tolist(), scores, top_k=args.top_k, go_desc=None)
+    df_sub.to_csv(out_csv, sep='\t', index=False)
+    print(f"✅ Saved Kaggle-ready TSV submission ({top_k} GO terms/protein): {out_csv}")
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
@@ -103,5 +103,4 @@ if __name__ == '__main__':
                    args.out_prefix + '_vectorizer.joblib')
 
     elif args.mode == 'predict':
-        predict_mode(args.model, args.vectorizer, args.fasta,
-                 args.out_prefix + '_submission.csv', top_k=args.top_k)
+        predict_mode(args.model, args.vectorizer, args.fasta, args.out_prefix + "_submission.tsv", top_k=args.top_k)
