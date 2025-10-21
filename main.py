@@ -1,88 +1,107 @@
 import argparse
 import pandas as pd
-import numpy as np
-from joblib import load, dump
 from scipy import sparse
+from joblib import dump, load
+from sklearn.preprocessing import MultiLabelBinarizer
+from utils import read_fasta, build_feature_matrix, KmerTfidf, make_submission_dataframe
+from models import BaselineModel
 
-from utils import read_fasta, build_feature_matrix, make_submission_dataframe, esm_batch_embed_hf
-from models import BaselineModel, MultiLabelBinarizer
+def prepare_train_csv(train_terms_path, fasta_path, out_csv, top_k_go=None, sample_size=None):
+    terms = pd.read_csv(train_terms_path, sep='\t')
+    if top_k_go is not None:
+        top_terms = terms['term'].value_counts().nlargest(top_k_go).index
+        terms = terms[terms['term'].isin(top_terms)]
+
+    go_grouped = (
+        terms.groupby('EntryID')['term']
+        .apply(lambda x: ' '.join(sorted(x)))
+        .reset_index()
+        .rename(columns={'EntryID': 'Id', 'term': 'GO_terms'})
+    )
+
+    seq_dict = read_fasta(fasta_path)
+    seq_df = pd.DataFrame(list(seq_dict.items()), columns=['Id', 'sequence'])
+    train_df = seq_df.merge(go_grouped, on='Id', how='inner')
+
+    if sample_size is not None and len(train_df) > sample_size:
+        train_df = train_df.sample(sample_size, random_state=42).reset_index(drop=True)
+        print(f"⚠️ Using a random sample of {sample_size} sequences for debug mode")
+
+    train_df.to_csv(out_csv, index=False)
+    print(f"✅ Saved merged train CSV: {out_csv}")
+    return train_df
+
+def featurize_mode(train_terms, fasta_path, out_prefix, top_k_go=None, sample_size=None):
+    print("🔧 Building training feature matrix...")
+    train_df = prepare_train_csv(train_terms, fasta_path, out_prefix + '_train.csv',
+                                 top_k_go=top_k_go, sample_size=sample_size)
+    seqs = train_df['sequence'].tolist()
+    
+    km = KmerTfidf(k=3, max_features=2000)
+    km.fit(seqs)
+    dump(km, out_prefix + '_vectorizer.joblib')
+    print(f"💾 Saved Kmer vectorizer: {out_prefix}_vectorizer.joblib")
+
+    X = build_feature_matrix(seqs, use_kmer=True, pretrained_vec=km)
+    sparse.save_npz(out_prefix + '_features.npz', X)
+    print(f"💾 Saved feature matrix: {out_prefix}_features.npz")
+    return train_df, X
+
+def train_mode(train_csv, feature_file, model_path, vectorizer_file):
+    print("🧠 Training lightweight BaselineModel...")
+    df = pd.read_csv(train_csv)
+    X = sparse.load_npz(feature_file)
+    y_list = [s.split() for s in df['GO_terms']]
+    mlb = MultiLabelBinarizer()
+    Y = mlb.fit_transform(y_list)
+
+    model = BaselineModel()
+    model.fit(X, Y)
+    
+    dump(model, model_path)
+    dump(mlb, model_path + '.mlb.joblib')
+    print(f"✅ Model saved: {model_path}")
+    print(f"✅ MultiLabelBinarizer saved: {model_path}.mlb.joblib")
+
+def predict_mode(model_path, vectorizer_path, test_fasta, out_csv, top_k=20):
+    print("🔮 Generating predictions...")
+    model = load(model_path)
+    mlb = load(model_path + '.mlb.joblib')
+    km = load(vectorizer_path)
+
+    fasta = read_fasta(test_fasta)
+    ids, seqs = list(fasta.keys()), list(fasta.values())
+
+    X = build_feature_matrix(seqs, use_kmer=True, pretrained_vec=km)
+    scores = model.predict_proba(X)
+
+    df_sub = make_submission_dataframe(ids, mlb.classes_.tolist(), scores, top_k=top_k)
+    df_sub.to_csv(out_csv, index=False)
+    print(f"✅ Saved Kaggle-ready submission ({top_k} GO terms/protein): {out_csv}")
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
-    p.add_argument('--mode', choices=['inspect','featurize','embed','train','predict'], required=True)
-    p.add_argument('--train')
-    p.add_argument('--test')
-    p.add_argument('--seqs')
-    p.add_argument('--features')
+    p.add_argument('--mode', choices=['featurize', 'train', 'predict'], required=True)
+    p.add_argument('--train_terms', help='Path to train_terms.csv')
+    p.add_argument('--fasta', help='Path to train_sequences.fasta or test_sequences.fasta')
+    p.add_argument('--out_prefix')
     p.add_argument('--model')
-    p.add_argument('--out', default='submission.csv')
-    p.add_argument('--top-k', type=int, default=100, help='number of top GO terms per protein to include in submission')
+    p.add_argument('--vectorizer')
+    p.add_argument('--top-go', type=int, default=100)
+    p.add_argument('--sample', type=int, default=1000)
+    p.add_argument('--top-k', type=int, default=20)
     args = p.parse_args()
-    if args.mode == 'inspect':
-        if args.train:
-            df = pd.read_csv(args.train)
-            print("Train head:\n", df.head())
-            print("Number of sequences:", len(df))
-        if args.test:
-            df = pd.read_csv(args.test)
-            print("Test head:\n", df.head())
-            
+
     if args.mode == 'featurize':
-        if args.train and args.seqs:
-            # load GO terms CSV
-            terms = pd.read_csv(args.train, sep='\t') # train_terms.csv
-            go_grouped = terms.groupby('EntryID')['term'].apply(lambda x: ' '.join(sorted(x))).reset_index()
-            go_grouped.rename(columns={'EntryID':'Id', 'term':'GO_terms'}, inplace=True)
+        featurize_mode(args.train_terms, args.fasta, args.out_prefix,
+                       top_k_go=args.top_go, sample_size=args.sample)
 
-            # Load FASTA train sequences
-            seq_dict = read_fasta(args.seqs)
-            seq_df = pd.DataFrame(list(seq_dict.items()), columns=['Id','sequence'])
+    elif args.mode == 'train':
+        train_mode(args.out_prefix + '_train.csv',
+                   args.out_prefix + '_features.npz',
+                   args.model,
+                   args.out_prefix + '_vectorizer.joblib')
 
-            # merge GO terms infos with fasta sequences to get in one csv file :
-            # - Id , sequence, GO terms ' ' separated
-            train_df = seq_df.merge(go_grouped, on='Id')
-            train_csv = args.out or 'train_for_pipeline.csv'
-            train_df.to_csv(train_csv, index=False)
-            print('Saved CSV for training:', train_csv)
-
-            # build feature matrix
-            seqs = train_df['sequence'].tolist()
-            X = build_feature_matrix(seqs, use_kmer=True)
-            feat_file = train_csv.replace('.csv', '_features.npz')
-            sparse.save_npz(feat_file, X)
-            print('Saved training features:', feat_file)
-            
-    if args.mode == 'embed':
-        if args.seqs:
-            fasta = read_fasta(args.seqs)
-            ids, seqs = list(fasta.keys()), list(fasta.values())
-            emb = esm_batch_embed_hf(seqs)
-            np.save(args.out or 'embeddings.npy', emb)
-            print("Saved embeddings:", args.out or 'embeddings.npy')
-    if args.mode == 'train':
-        if args.train:
-            df = pd.read_csv(args.train)
-            seqs = df['sequence'].tolist()
-            X = build_feature_matrix(seqs, use_kmer=True)
-            y_list = [s.split() for s in df['GO_terms']]
-            mlb = MultiLabelBinarizer()
-            Y = mlb.fit_transform(y_list)
-            model = BaselineModel()
-            model.fit(X, Y)
-            dump(model, args.model)
-            dump(mlb, args.model + '.mlb.joblib')
-            print("Saved trained model:", args.model)
-    if args.mode == 'predict':
-        model = load(args.model)
-        mlb = load(args.model + '.mlb.joblib')
-        if args.test.endswith('.fasta'):
-            fasta = read_fasta(args.test)
-            ids, seqs = list(fasta.keys()), list(fasta.values())
-        else:
-            df = pd.read_csv(args.test)
-            ids, seqs = df['Id'].tolist(), df['sequence'].tolist()
-        X = build_feature_matrix(seqs, use_kmer=True)
-        scores = model.predict_proba(X)
-        df_sub = make_submission_dataframe(ids, mlb.classes_.tolist(), scores, top_k=args.top_k)
-        df_sub.to_csv(args.out, index=False)
-        print(f'Saved Kaggle-ready submission (flat format with top {args.top_k}):', args.out)
+    elif args.mode == 'predict':
+        predict_mode(args.model, args.vectorizer, args.fasta,
+                 args.out_prefix + '_submission.csv', top_k=args.top_k)

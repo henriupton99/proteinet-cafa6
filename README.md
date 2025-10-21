@@ -1,6 +1,6 @@
 # CAFA6 : Protein Function Prediction
 
-CAFA6 -- Baseline pipeline (updated for Kaggle CAFA-6 submission format: Id, GO_term, score)
+Baseline pipeline (updated for Kaggle CAFA-6 submission format: Id, GO_term, score)
 
 This baseline now produces submission files matching the official CAFA-6 requirements:
 Each line = one (protein, GO_term) pair with an associated probability.
@@ -22,17 +22,36 @@ Includes:
 * Baseline Logistic Regression model
 * Top-K flat submission output
 
-### 1. feature extraction from GO terms and FASTA sequences
+## Step 1 : Features embeddings generation
 
 ```bash
-uv run python3 main.py --mode featurize --train ./data/train/train_terms.tsv --seqs ./data/train/train_sequences.fasta --out ./data/train/train_for_pipeline.csv
+uv run python main.py 
+--mode featurize
+--train_terms path/to/train_terms.csv
+--fasta path/to/train_sequences.fasta
+--out_prefix /path/to/data/test_run
+--sample 1000
+--top-go 100
 ```
 
-### 2. Model training based on embeddings of step 1
+# Step 2 : Model training
 
-TBU
+```bash
+uv run python main.py 
+--mode train
+--out_prefix path/to/data/test_run
+--model path/to/model.joblib
+```
 
-### 3. Inference based on model of step 2
+## Step 3 : Inference and submission
 
-TBU
+```bash
+uv run python3 main.py 
+--mode predict 
+--model path/to/model.joblib 
+--vectorizer path/to/vectorizer.joblib 
+--fasta path/to/testsuperset.fasta 
+--out_prefix path/to/predictions/sample_submission
+--top-k 20
+```
 

@@ -2,25 +2,40 @@ from typing import List, Dict
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
+from scipy.sparse import hstack, csr_matrix
     
 AMINO_ACIDS = list("ACDEFGHIKLMNPQRSTVWY")
 
 def read_fasta(fasta_path):
     seqs = {}
+    cur_id = None
+    cur_seq = []
+
     with open(fasta_path) as f:
-        cur_id = None
-        cur_seq = []
         for line in f:
             line = line.strip()
+            if not line:
+                continue
             if line.startswith('>'):
-                if cur_id:
+                if cur_id and cur_seq:
                     seqs[cur_id] = ''.join(cur_seq)
-                cur_id = line.split('|')[1]  # Q5W0B1 etc
+                header = line[1:].strip()
+                
+                if '|' in header:
+                    parts = header.split('|')
+                    if len(parts) > 1:
+                        cur_id = parts[1]
+                    else:
+                        cur_id = parts[0]
+                else:
+                    cur_id = header.split()[0] 
                 cur_seq = []
             else:
                 cur_seq.append(line)
-        if cur_id:
-            seqs[cur_id] = ''.join(cur_seq)
+                
+    if cur_id and cur_seq:
+        seqs[cur_id] = ''.join(cur_seq)
+
     return seqs
 
 def aa_composition(seq: str) -> np.ndarray:
@@ -41,13 +56,12 @@ def kmerize(seq: str, k: int) -> List[str]:
 class KmerTfidf:
     def __init__(self, k=3, max_features=20000):
         self.k = k
-        # Analyzer callable : reçoit un document et renvoie la liste de k-mers
         self.vec = TfidfVectorizer(analyzer=self.kmer_analyzer, max_features=max_features)
 
     def kmer_analyzer(self, seq):
         seq = seq.upper()
         if len(seq) < self.k:
-            return []  # ignore sequences trop courtes
+            return []
         return [seq[i:i+self.k] for i in range(len(seq)-self.k+1)]
 
     def fit(self, seqs: List[str]):
@@ -91,22 +105,33 @@ def esm_batch_embed_hf(seqs: List[str], model_name='facebook/esm2_t6_8M_UR50D', 
 def make_submission_dataframe(ids: List[str], terms: List[str], scores: np.ndarray, top_k: int=100) -> pd.DataFrame:
     rows = []
     for i, pid in enumerate(ids):
-        # Select top_k GO terms by score per protein
         top_idx = np.argsort(scores[i])[::-1][:top_k]
         for j in top_idx:
             rows.append({'Id': pid, 'GO_term': terms[j], 'score': float(scores[i, j])})
     return pd.DataFrame(rows, columns=['Id','GO_term','score'])
 
-def build_feature_matrix(seqs: List[str], use_kmer=True, k=3, max_kmer_features=20000):
+def build_feature_matrix(
+    seqs: List[str],
+    use_kmer=True,
+    k=3,
+    max_kmer_features=20000,
+    pretrained_vec=None
+    ):
+    
     comp = np.vstack([sequence_length_feature(s) for s in seqs])
     aa = np.vstack([aa_composition(s) for s in seqs])
     X_base = np.hstack([comp, aa])
+    
     if use_kmer:
-        km = KmerTfidf(k=k, max_features=max_kmer_features)
-        km.fit(seqs)
-        Xk = km.transform(seqs)
-        from scipy.sparse import hstack, csr_matrix
+        if pretrained_vec is not None:
+            Xk = pretrained_vec.transform(seqs)
+        else:
+            km = KmerTfidf(k=k, max_features=max_kmer_features)
+            km.fit(seqs)
+            Xk = km.transform(seqs)
+
         X = hstack([csr_matrix(X_base), Xk])
     else:
-        X = X_base
+        X = csr_matrix(X_base)
+
     return X
